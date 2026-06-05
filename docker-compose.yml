@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:16.4-alpine
+    container_name: english-coach-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: coach
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: englishcoach
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7.2.5-alpine
+    container_name: english-coach-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+volumes:
+  pgdata:
