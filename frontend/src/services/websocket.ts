@@ -22,16 +22,22 @@ export interface ErrorMessage {
   content: string;
 }
 
+export interface AudioEndAckMessage {
+  type: 'audio_end_ack';
+}
+
 export type WebSocketMessage =
   | PingMessage
   | PongMessage
   | UserTextMessage
   | AssistantTextMessage
-  | ErrorMessage;
+  | ErrorMessage
+  | AudioEndAckMessage;
 
 // ── 心跳配置 ──
 const HEARTBEAT_INTERVAL = 30_000; // 30 秒
 const PONG_TIMEOUT = 10_000;       // 10 秒无 pong 则断开
+const MAX_BUFFERED_AMOUNT = 65536; // 二进制发送缓冲区上限 64KB
 
 /** 连接状态 */
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -53,12 +59,14 @@ export function buildWsUrl(scenarioId: string | number): string {
 
 export interface UseChatWebSocketOptions {
   scenarioId: string | number;
-  onMessage: (msg: WebSocketMessage) => void;
+  onMessage: (msg: WebSocketMessage | ArrayBuffer) => void;
   onStatusChange?: (status: ConnectionStatus, detail?: string) => void;
 }
 
 export interface UseChatWebSocketReturn {
   sendUserText: (content: string) => void;
+  sendBinary: (data: ArrayBuffer) => void;
+  sendAudioEnd: () => void;
   close: () => void;
 }
 
@@ -112,6 +120,7 @@ export function createChatWebSocket(options: UseChatWebSocketOptions): UseChatWe
     // new WebSocket() 可能对非法 URL 抛 SyntaxError
     try {
       ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer'; // ★ 关键：二进制帧以 ArrayBuffer 而非 Blob 到达
     } catch (err) {
       console.error('[WS] Invalid URL:', url, err);
       onStatusChange?.('error', '无效的 WebSocket 地址');
@@ -130,6 +139,13 @@ export function createChatWebSocket(options: UseChatWebSocketOptions): UseChatWe
     };
 
     ws.onmessage = (event) => {
+      // ★ 二进制音频帧直接透传
+      if (event.data instanceof ArrayBuffer) {
+        onMessage(event.data);
+        return;
+      }
+
+      // 文本消息
       try {
         const msg: WebSocketMessage = JSON.parse(event.data);
         if (msg.type === 'pong') {
@@ -174,6 +190,18 @@ export function createChatWebSocket(options: UseChatWebSocketOptions): UseChatWe
     }
   }
 
+  function sendBinary(data: ArrayBuffer) {
+    if (ws?.readyState === WebSocket.OPEN && ws.bufferedAmount < MAX_BUFFERED_AMOUNT) {
+      ws.send(data);
+    }
+  }
+
+  function sendAudioEnd() {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'audio_end' }));
+    }
+  }
+
   function close() {
     isCleanedUp = true;
     clearTimers();
@@ -183,5 +211,5 @@ export function createChatWebSocket(options: UseChatWebSocketOptions): UseChatWe
 
   connect();
 
-  return { sendUserText, close };
+  return { sendUserText, sendBinary, sendAudioEnd, close };
 }

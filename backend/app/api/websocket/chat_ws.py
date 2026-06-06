@@ -53,6 +53,8 @@ async def chat_endpoint(websocket: WebSocket, scenario_id: int):
     支持的消息类型:
       - ping / pong: 心跳
       - user_text: 用户文本消息，回复 assistant_text
+      - audio_end: 音频流结束标记（文本），回复 audio_end_ack
+      - 二进制帧: 16kHz 16-bit PCM 音频数据，原样回传（回声测试）
     """
     # 1. 验证场景存在
     scenario = await _validate_scenario(scenario_id)
@@ -64,7 +66,9 @@ async def chat_endpoint(websocket: WebSocket, scenario_id: int):
     logger.info(f"WebSocket connected: scenario_id={scenario_id}, name={scenario.name}")
 
     # 2. 发送开场白
-    greeting = SCENARIO_GREETINGS.get(scenario.name, "Welcome! Let's practice some English conversation.")
+    greeting = SCENARIO_GREETINGS.get(
+        scenario.name, "Welcome! Let's practice some English conversation."
+    )
     await websocket.send_text(json.dumps({
         "type": "assistant_text",
         "content": greeting,
@@ -72,38 +76,51 @@ async def chat_endpoint(websocket: WebSocket, scenario_id: int):
 
     try:
         while True:
-            raw = await websocket.receive_text()
+            # 改用 receive() 以同时支持文本和二进制消息
+            message = await websocket.receive()
 
-            # 安全解析 JSON
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                await websocket.send_text(json.dumps({
-                    "type": "error",
-                    "content": "Invalid JSON format",
-                }))
-                continue
+            # 手动检测断连
+            if message["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect(message.get("code", 1000))
 
-            msg_type = data.get("type")
-
-            if msg_type == "ping":
-                await websocket.send_text(json.dumps({"type": "pong"}))
-
-            elif msg_type == "user_text":
-                user_content = data.get("content", "").strip()
-                if not user_content:
+            # ── 文本消息 ──
+            if "text" in message:
+                try:
+                    data = json.loads(message["text"])
+                except json.JSONDecodeError:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "content": "Invalid JSON format",
+                    }))
                     continue
 
-                # 模拟回复（随机选取）
-                reply = random.choice(MOCK_REPLIES)
-                await websocket.send_text(json.dumps({
-                    "type": "assistant_text",
-                    "content": reply,
-                }))
+                msg_type = data.get("type")
 
-            else:
-                # 未知消息类型 → 忽略（不报错也不断开）
-                logger.debug(f"Unknown message type: {msg_type}")
+                if msg_type == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+
+                elif msg_type == "user_text":
+                    user_content = data.get("content", "").strip()
+                    if not user_content:
+                        continue
+                    reply = random.choice(MOCK_REPLIES)
+                    await websocket.send_text(json.dumps({
+                        "type": "assistant_text",
+                        "content": reply,
+                    }))
+
+                elif msg_type == "audio_end":
+                    logger.info(f"Audio stream ended: scenario_id={scenario_id}")
+                    await websocket.send_text(json.dumps({
+                        "type": "audio_end_ack",
+                    }))
+
+                else:
+                    logger.debug(f"Unknown message type: {msg_type}")
+
+            # ── 二进制消息（音频帧）→ 原样回传 ──
+            elif "bytes" in message:
+                await websocket.send_bytes(message["bytes"])
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected: scenario_id={scenario_id}")
