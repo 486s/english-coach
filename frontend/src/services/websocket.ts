@@ -84,6 +84,7 @@ export function createChatWebSocket(options: UseChatWebSocketOptions): UseChatWe
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let pongTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   let isCleanedUp = false;
+  let errorOccurred = false;
 
   // ── 清理所有定时器 ──
   function clearTimers() {
@@ -162,8 +163,9 @@ export function createChatWebSocket(options: UseChatWebSocketOptions): UseChatWe
     };
 
     ws.onerror = () => {
+      if (isCleanedUp) return;
       console.error('[WS] Connection error');
-      onStatusChange?.('error', 'WebSocket 连接失败，请检查后端服务是否启动');
+      errorOccurred = true; // 标记错误，由 onclose 统一报告
     };
 
     ws.onclose = (event) => {
@@ -171,14 +173,17 @@ export function createChatWebSocket(options: UseChatWebSocketOptions): UseChatWe
       clearTimers();
 
       if (!isCleanedUp) {
-        // 根据关闭码提供具体错误信息
-        const detail =
-          event.code === 4004
+        // 合并 onerror 的信息，避免双重状态报告
+        const detail = errorOccurred
+          ? 'WebSocket 连接失败，请检查后端服务是否启动'
+          : event.code === 4004
             ? '该场景不存在或已被禁用'
-            : event.code === 1006
-              ? '连接异常中断，后端服务可能已停止'
-              : `连接已关闭 (code: ${event.code})`;
-        onStatusChange?.('disconnected', detail);
+            : `连接已关闭 (code: ${event.code})`;
+        onStatusChange?.(
+          errorOccurred ? 'error' : 'disconnected',
+          detail,
+        );
+        errorOccurred = false;
       }
     };
   }
@@ -191,9 +196,16 @@ export function createChatWebSocket(options: UseChatWebSocketOptions): UseChatWe
   }
 
   function sendBinary(data: ArrayBuffer) {
-    if (ws?.readyState === WebSocket.OPEN && ws.bufferedAmount < MAX_BUFFERED_AMOUNT) {
-      ws.send(data);
+    if (ws?.readyState !== WebSocket.OPEN) {
+      console.warn('[WS] Cannot send binary: WebSocket not open');
+      return;
     }
+    if (ws.bufferedAmount >= MAX_BUFFERED_AMOUNT) {
+      console.warn('[WS] Buffer full, dropping audio chunk');
+      onStatusChange?.('error', '音频缓冲区已满，请稍后再试');
+      return;
+    }
+    ws.send(data);
   }
 
   function sendAudioEnd() {
@@ -205,8 +217,15 @@ export function createChatWebSocket(options: UseChatWebSocketOptions): UseChatWe
   function close() {
     isCleanedUp = true;
     clearTimers();
-    ws?.close(1000, 'Client navigating away');
-    ws = null;
+
+    if (ws) {
+      // 只在 OPEN 状态时主动关闭；CONNECTING 调用 close() 会抛异常
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close(1000, 'Client navigating away');
+      }
+      // CONNECTING → onopen 检测到 isCleanedUp 会自行关闭
+      // 不将 ws 置 null，确保 onopen 中 ws?.close() 仍有效
+    }
   }
 
   connect();

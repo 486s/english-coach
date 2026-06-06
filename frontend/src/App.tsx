@@ -4,7 +4,12 @@ import { ChatPage } from './pages/ChatPage'
 
 function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter
+      future={{
+        v7_startTransition: true,
+        v7_relativeSplatPath: true,
+      }}
+    >
       <Routes>
         <Route path="/" element={<ScenarioSelectPage />} />
         <Route path="/chat/:scenarioId" element={<ChatPage />} />

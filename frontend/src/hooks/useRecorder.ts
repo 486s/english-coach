@@ -1,4 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
+import { float32ToPcm } from '../utils/audio';
 
 export interface RecorderCallbacks {
   /** 每 ~85ms 产生一个音频块（16kHz 16-bit PCM ArrayBuffer） */
@@ -12,25 +13,6 @@ export interface RecorderCallbacks {
 /** 采样率常数 */
 const TARGET_SAMPLE_RATE = 16000;
 const INPUT_SAMPLE_RATE = 48000;
-
-/**
- * Float32 → 16-bit PCM ArrayBuffer（小端序）
- * 使用 Math.round 做对称量化，避免截断精度损失
- */
-function float32ToInt16Pcm(float32Array: Float32Array): ArrayBuffer {
-  const buffer = new ArrayBuffer(float32Array.length * 2);
-  const view = new DataView(buffer);
-  for (let i = 0; i < float32Array.length; i++) {
-    const clamped = Math.max(-1, Math.min(1, float32Array[i]));
-    const intSample = Math.round(clamped * 32767);
-    view.setInt16(
-      i * 2,
-      Math.max(-32768, Math.min(32767, intSample)),
-      true, // little-endian
-    );
-  }
-  return buffer;
-}
 
 /**
  * 线性插值降采样：从 inputSampleRate 降至 outputSampleRate
@@ -117,6 +99,10 @@ export const useRecorder = () => {
 
       // ★ 保存回调引用（用于 onaudioprocess 中读取最新版本）
       callbacksRef.current = callbacks;
+      // ★ 在异步 getUserMedia 之前将 isRecordingRef 设为 true，
+      //   这样 .then 回调中的双重检查才能正确判断 "停止" 状态。
+      isRecordingRef.current = true;
+      setIsRecording(true);
 
       navigator.mediaDevices
         .getUserMedia({
@@ -128,7 +114,8 @@ export const useRecorder = () => {
           },
         })
         .then((stream) => {
-          // 双重检查：异步期间可能已被 stopRecording 调用
+          // ★ 双重检查：异步期间可能已被 stopRecording 调用，
+          //   若被 stop，流已被清理，应当丢弃该流
           if (!isRecordingRef.current) {
             stream.getTracks().forEach((t) => t.stop());
             return;
@@ -156,18 +143,19 @@ export const useRecorder = () => {
               audioContext.sampleRate,
               TARGET_SAMPLE_RATE,
             );
-            const pcmBuffer = float32ToInt16Pcm(downsampled);
+            const pcmBuffer = float32ToPcm(downsampled);
             callbacksRef.current.onAudioChunk(pcmBuffer);
           };
 
           source.connect(processor);
-          processor.connect(audioContext.destination); // 可选，监听扬声器（回声测试用）
-
-          isRecordingRef.current = true;
-          setIsRecording(true);
+          // 处理器输出为静音（未写入 outputBuffer），无需连接 destination
+          // 回声播放由 usePlayer 的独立 AudioContext 负责
         })
         .catch((err) => {
           console.error('[Recorder] getUserMedia error:', err);
+          // ★ 异步失败后恢复 isRecording 状态
+          isRecordingRef.current = false;
+          setIsRecording(false);
           callbacks.onError?.(
             err instanceof Error ? err : new Error(String(err)),
           );
