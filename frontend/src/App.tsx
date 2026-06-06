@@ -1,8 +1,16 @@
-export default function App() {
+import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { ScenarioSelectPage } from './pages/ScenarioSelectPage'
+import { ChatPage } from './pages/ChatPage'
+
+function App() {
   return (
-    <div>
-      <h1>AI English Coach</h1>
-      <p>Welcome!</p>
-    </div>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<ScenarioSelectPage />} />
+        <Route path="/chat/:scenarioId" element={<ChatPage />} />
+      </Routes>
+    </BrowserRouter>
   )
 }
+
+export default App
