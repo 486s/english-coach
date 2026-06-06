@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import type { WebSocketMessage, ConnectionStatus } from '../services/websocket';
 import { createChatWebSocket } from '../services/websocket';
 import { useRecorder } from '../hooks/useRecorder';
-import { useSimplePlayer } from '../hooks/useSimplePlayer';
+import { usePlayer } from '../hooks/usePlayer';
 import type { RecorderCallbacks } from '../hooks/useRecorder';
 
 // ── 类型 ──
@@ -37,8 +37,17 @@ export const ChatPage = () => {
   // ★ 录音器
   const { isRecording, startRecording, stopRecording } = useRecorder();
 
-  // ★ 简易播放器（回声测试用）
-  const { playPcm } = useSimplePlayer();
+  // ★ 带队列的音频播放器（回声测试用）
+  const { enqueue, clearQueue } = usePlayer({
+    sampleRate: 16000,
+    onError: (err) => {
+      console.error('[ChatPage] Playback error:', err);
+    },
+  });
+
+  // ★ 用 ref 持有最新 enqueue，避免重建 WebSocket
+  const enqueueRef = useRef(enqueue);
+  enqueueRef.current = enqueue;
 
   // ── 场景 ID 验证（useMemo 避免重复计算） ──
   const validScenarioId = useMemo(() => {
@@ -72,10 +81,10 @@ export const ChatPage = () => {
     wsRef.current = createChatWebSocket({
       scenarioId: validScenarioId,
       onMessage: (msg: WebSocketMessage | ArrayBuffer) => {
-        // ★ 二进制音频帧 → 播放（回声测试）
+        // ★ 二进制音频帧 → 入队播放（回声测试）
         if (msg instanceof ArrayBuffer) {
           if (msg.byteLength > 0) {
-            playPcm(msg);
+            enqueueRef.current(msg); // 通过 ref 访问最新 enqueue，避免重连 WebSocket
           }
           return;
         }
@@ -100,6 +109,13 @@ export const ChatPage = () => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [validScenarioId]);
+
+  // ── 卸载时清空播放队列，防止内存泄漏 ──
+  useEffect(() => {
+    return () => {
+      clearQueue();
+    };
+  }, [clearQueue]);
 
   // ── 自动滚动到底部 ──
   useEffect(() => {
