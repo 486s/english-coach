@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.websocket.chat_ws import chat_endpoint
+from app.api.websocket.chat_ws import router as chat_ws_router
 from app.api.routes.scenarios import router as scenarios_router
 
 
@@ -35,5 +35,5 @@ async def health():
 
 
 # 注册路由
-app.add_websocket_route("/ws/chat", chat_endpoint)
+app.include_router(chat_ws_router)
 app.include_router(scenarios_router, prefix="/api/v1")
