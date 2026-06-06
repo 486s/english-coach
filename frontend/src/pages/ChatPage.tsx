@@ -2,6 +2,9 @@ import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import type { WebSocketMessage, ConnectionStatus } from '../services/websocket';
 import { createChatWebSocket } from '../services/websocket';
+import { useRecorder } from '../hooks/useRecorder';
+import { useSimplePlayer } from '../hooks/useSimplePlayer';
+import type { RecorderCallbacks } from '../hooks/useRecorder';
 
 // ── 类型 ──
 interface Message {
@@ -30,6 +33,12 @@ export const ChatPage = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<ReturnType<typeof createChatWebSocket> | null>(null);
+
+  // ★ 录音器
+  const { isRecording, startRecording, stopRecording } = useRecorder();
+
+  // ★ 简易播放器（回声测试用）
+  const { playPcm } = useSimplePlayer();
 
   // ── 场景 ID 验证（useMemo 避免重复计算） ──
   const validScenarioId = useMemo(() => {
@@ -62,12 +71,22 @@ export const ChatPage = () => {
 
     wsRef.current = createChatWebSocket({
       scenarioId: validScenarioId,
-      onMessage: (msg: WebSocketMessage) => {
+      onMessage: (msg: WebSocketMessage | ArrayBuffer) => {
+        // ★ 二进制音频帧 → 播放（回声测试）
+        if (msg instanceof ArrayBuffer) {
+          if (msg.byteLength > 0) {
+            playPcm(msg);
+          }
+          return;
+        }
+
+        // 文本消息（原有逻辑不变）
         if (msg.type === 'assistant_text') {
           addMessage('assistant', msg.content);
         } else if (msg.type === 'error') {
           addMessage('system', `⚠ ${msg.content}`);
         }
+        // audio_end_ack 静默处理，不做 UI 展示
       },
       onStatusChange: (newStatus, detail) => {
         setStatus(newStatus);
@@ -110,6 +129,47 @@ export const ChatPage = () => {
       sendMessage();
     }
   };
+
+  // ══════════════════════════════════════════════
+  //  录音相关
+  // ══════════════════════════════════════════════
+
+  /** 录音音频块处理器 → 通过 WebSocket 发送二进制帧 */
+  const handleAudioChunk = useCallback(
+    (chunk: ArrayBuffer) => {
+      wsRef.current?.sendBinary(chunk);
+    },
+    [], // wsRef 是 ref，不需要加入依赖
+  );
+
+  /** 录音结束处理器 @type {RecorderCallbacks['onEnd']} */
+  const handleRecordingEnd = useCallback(() => {
+    wsRef.current?.sendAudioEnd();
+  }, []);
+
+  /** 录音错误处理器 @type {RecorderCallbacks['onError']} */
+  const handleRecordingError = useCallback(
+    (err: Error) => {
+      console.error('[ChatPage] Recorder error:', err);
+      addMessage('system', `⚠ 麦克风错误: ${err.message}`);
+    },
+    [addMessage],
+  );
+
+  /** 开始录音（用于 PointerDown / TouchStart） */
+  const handleStartRecording = useCallback(() => {
+    if (isRecording) return;
+    startRecording({
+      onAudioChunk: handleAudioChunk,
+      onEnd: handleRecordingEnd,
+      onError: handleRecordingError,
+    } satisfies RecorderCallbacks);
+  }, [isRecording, startRecording, handleAudioChunk, handleRecordingEnd, handleRecordingError]);
+
+  /** 停止录音（用于 PointerUp / TouchEnd） */
+  const handleStopRecording = useCallback(() => {
+    stopRecording();
+  }, [stopRecording]);
 
   // ══════════════════════════════════════════════
   //  渲染：无效场景 ID
@@ -239,30 +299,59 @@ export const ChatPage = () => {
       </main>
 
       {/* 输入区域 */}
-      <footer className="bg-white border-t p-3 flex gap-2 shrink-0">
-        <input
-          ref={inputRef}
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          disabled={isInputDisabled}
-          placeholder={
-            isInputDisabled ? '连接中...' : '输入消息，按 Enter 发送...'
-          }
-          className="flex-1 border border-gray-300 rounded-lg px-4 py-2.5 text-sm
-                     focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent
-                     placeholder:text-gray-400 disabled:bg-gray-100 disabled:cursor-not-allowed"
-        />
-        <button
-          onClick={sendMessage}
-          disabled={!input.trim() || isInputDisabled}
-          className="bg-blue-500 text-white px-5 py-2 rounded-lg text-sm font-medium
-                     hover:bg-blue-600 active:bg-blue-700 transition-colors
-                     disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-        >
-          发送
-        </button>
+      <footer className="bg-white border-t p-3 flex flex-col gap-2 shrink-0">
+        {/* ★ 按住说话按钮 */}
+        <div className="flex justify-center">
+          <button
+            type="button"
+            onPointerDown={handleStartRecording}
+            onPointerUp={handleStopRecording}
+            onPointerLeave={handleStopRecording}
+            onPointerCancel={handleStopRecording}
+            disabled={status !== 'connected'}
+            style={{ touchAction: 'none', userSelect: 'none' }}
+            className={`px-6 py-3 rounded-full font-medium transition-all select-none
+              ${status !== 'connected'
+                ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                : isRecording
+                  ? 'bg-red-500 text-white animate-pulse scale-110'
+                  : 'bg-green-500 text-white hover:bg-green-600 active:scale-95'
+              }`}
+          >
+            {status !== 'connected'
+              ? '🎤 未连接'
+              : isRecording
+                ? '🔴 松开结束'
+                : '🎤 按住说话'}
+          </button>
+        </div>
+
+        {/* 文本输入 + 发送按钮 */}
+        <div className="flex gap-2">
+          <input
+            ref={inputRef}
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={isInputDisabled}
+            placeholder={
+              isInputDisabled ? '连接中...' : '输入消息，按 Enter 发送...'
+            }
+            className="flex-1 border border-gray-300 rounded-lg px-4 py-2.5 text-sm
+                       focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent
+                       placeholder:text-gray-400 disabled:bg-gray-100 disabled:cursor-not-allowed"
+          />
+          <button
+            onClick={sendMessage}
+            disabled={!input.trim() || isInputDisabled}
+            className="bg-blue-500 text-white px-5 py-2 rounded-lg text-sm font-medium
+                       hover:bg-blue-600 active:bg-blue-700 transition-colors
+                       disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+          >
+            发送
+          </button>
+        </div>
       </footer>
     </div>
   );
